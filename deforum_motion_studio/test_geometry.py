@@ -48,15 +48,15 @@ class GeometryTests(unittest.TestCase):
         preview=GeometryPreview(cfg,tracks)
         expected=preview.source.copy()
         for f in range(1,7):expected=warp(expected,tracks[f],70,1)
-        np.testing.assert_array_equal(np.array(preview.seek(6)),expected)
-        np.testing.assert_array_equal(np.array(preview.seek(0)),preview.source)
-        np.testing.assert_array_equal(np.array(preview.seek(6)),expected)
+        np.testing.assert_array_equal(np.array(preview.seek(6, max_steps=100)[0]),expected)
+        np.testing.assert_array_equal(np.array(preview.seek(0, max_steps=100)[0]),preview.source)
+        np.testing.assert_array_equal(np.array(preview.seek(6, max_steps=100)[0]),expected)
     def test_recording_invalidation(self):
         tracks=np.zeros((10,6));cfg={'W':64,'H':96}
-        p=GeometryPreview(cfg,tracks.copy());p.seek(5)
+        p=GeometryPreview(cfg,tracks.copy());p.seek(5, max_steps=100)
         tracks[3,2]=5;p.update_tracks(tracks)
         expected=warp(p.source,tracks[3],70,1)
-        np.testing.assert_array_equal(np.array(p.seek(5)),expected)
+        np.testing.assert_array_equal(np.array(p.seek(5, max_steps=100)[0]),expected)
     def test_no_fake_depth_prediction(self):
         with self.assertRaisesRegex(ValueError,'depth warping OFF'):
             GeometryPreview({'use_depth_warping':True},np.zeros((10,6)))

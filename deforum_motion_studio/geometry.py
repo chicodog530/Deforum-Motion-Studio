@@ -95,16 +95,21 @@ class GeometryPreview:
             start=max((f for f in self.checkpoints if f<first),default=0)
             self.current=self.checkpoints[start].copy();self.last=start
 
-    def seek(self,frame):
+    def seek(self,frame,max_steps=5):
         frame=max(0,min(len(self.tracks)-1,int(frame)))
         if frame<self.last:
             start=max((f for f in self.checkpoints if f<=frame),default=0)
             self.current=self.checkpoints[start].copy();self.last=start
+        
+        target = frame
+        if frame - self.last > max_steps:
+            frame = self.last + max_steps
+            
         for f in range(self.last+1,frame+1):
             self.current=warp(self.current,self.tracks[f],self.fov[f],self.aspect[f],self.padding,self.sampling)
             if f%24==0:
                 self.checkpoints[f]=self.current.copy()
-                while len(self.checkpoints)>16:
+                while len(self.checkpoints)>32:
                     key=next(k for k in self.checkpoints if k!=0);del self.checkpoints[key]
         self.last=frame
-        return Image.fromarray(self.current)
+        return Image.fromarray(self.current), target == self.last

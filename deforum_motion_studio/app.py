@@ -132,7 +132,7 @@ class App:
         self.preview=tk.Canvas(right,bg='#101923',height=330,highlightthickness=0);self.preview.pack(fill='both',expand=True,pady=5)
         ttk.Label(right,text='Camera warp matched to your animation.py. AI regeneration and cadence blending are not simulated.').pack(anchor='w')
         row=ttk.Frame(right);row.pack(fill='x',pady=5)
-        self.button(row,' Play',self.play);self.button(row,' Pause / Stop',self.stop);self.button(row,' Record',self.record);self.button(row,'Undo',self.undo)
+        self.button(row,' ⏮',self.rewind);self.button(row,' Play',self.play);self.button(row,' Pause / Stop',self.stop);self.button(row,' Record',self.record);self.button(row,'Undo',self.undo)
         self.position_label=tk.StringVar();ttk.Label(row,textvariable=self.position_label).pack(side='right')
         self.timeline=tk.DoubleVar(value=0)
         self.seek=ttk.Scale(right,from_=0,to=799,variable=self.timeline,command=self.scrub);self.seek.pack(fill='x')
@@ -312,15 +312,22 @@ class App:
         except Exception as e:self.status.set(str(e));self.stop()
         self.root.after(20,self.tick)
 
+    def rewind(self):
+        self.stop()
+        self.frame=0;self.timeline.set(0);self.draw_preview()
+
     def draw_preview(self):
         c=self.preview;c.delete('all');w=max(100,c.winfo_width());h=max(100,c.winfo_height())
         f=min(self.frame,len(self.output)-1)
         if self.geometry is not None:
             try:
-                im=self.geometry.seek(f)
+                im, done = self.geometry.seek(f, max_steps=4 if not self.running else 1)
                 im.thumbnail((max(16,w-30),max(16,h-50)),Image.Resampling.LANCZOS)
                 self.tk_image=ImageTk.PhotoImage(im);c.create_image(w/2,h/2+10,image=self.tk_image)
-                title=f'Native {self.geometry.width}x{self.geometry.height} | FOV {self.geometry.fov[f]:.1f} | aspect {self.geometry.aspect[f]:.3f} | frame-by-frame warp'
+                title=f'Native {self.geometry.width}x{self.geometry.height} | FOV {self.geometry.fov[self.geometry.last]:.1f} | aspect {self.geometry.aspect[self.geometry.last]:.3f} | frame-by-frame warp'
+                if not done:
+                    title += f' (computing {self.geometry.last}/{f}...)'
+                    self.root.after(10, self.draw_preview)
             except ValueError as e:title=str(e)
         else:title=getattr(self,'geometry_error','Loading geometry...')
         c.create_text(12,12,anchor='nw',fill='white',width=max(80,w-24),text=title)
