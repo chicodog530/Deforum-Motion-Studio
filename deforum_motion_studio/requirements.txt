@@ -3,3 +3,4 @@ scipy>=1.11,<2
 Pillow>=10,<13
 pygame==2.6.1
 imageio-ffmpeg==0.6.0
+opencv-python-headless==4.11.0.86

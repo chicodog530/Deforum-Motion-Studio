@@ -1,4 +1,4 @@
-"""Deforum Motion Studio 0.1 — standalone Windows motion schedule editor."""
+"""Deforum Motion Studio 0.2 — standalone Windows motion schedule editor."""
 import copy
 import json
 import math
@@ -14,13 +14,14 @@ from PIL import Image, ImageTk
 from motion import (AXES,LABELS,LIMITS,PRESETS,load_config,parse_schedule,preset,
                     decode_audio,bass_envelope,pulse_positions,combine,export_config,resample)
 from controller import Controller
+from geometry import GeometryPreview
 
 ROOT=Path(__file__).resolve().parent
 COLORS=('#48c9b0','#59a5ff','#ffc857','#e77dff','#ff847c','#c1ce72')
 
 class App:
     def __init__(self,root):
-        self.root=root;root.title('Deforum Motion Studio 0.1');root.geometry('1250x900')
+        self.root=root;root.title('Deforum Motion Studio 0.2');root.geometry('1250x900')
         root.minsize(1050,850)
         style=ttk.Style();style.theme_use('clam')
         self.config={};self.base=np.zeros((800,6));self.recorded=np.zeros_like(self.base)
@@ -28,6 +29,7 @@ class App:
         self.env=None;self.env_times=None;self.audio_path='';self.preview_image=None;self.tk_image=None
         self.undo_stack=[];self.controller=Controller();self.pad_smooth=np.zeros(6);self.last_buttons=0
         self.messages=queue.Queue();self.player=None;self.audio_busy=False;self.last_record=-1
+        self.geometry=None;self.geometry_key=None
         self.vars={};self.limits=[];self.manual=[];self.enabled_axes=[];self.schedule_boxes=[]
         self.build()
         try: self.load_path(ROOT/'examples'/'working_baseline.txt',initial=True)
@@ -125,10 +127,10 @@ class App:
         ttk.Label(s,text='Expressions support t, pi, sin, cos, abs, sqrt, exp, log.\nUnsupported expressions are rejected; never executed.',wraplength=370).pack(anchor='w',pady=5)
 
         row=ttk.Frame(right);row.pack(fill='x')
-        ttk.Label(row,text='Approximate camera preview',font=('Segoe UI',12,'bold')).pack(side='left')
+        ttk.Label(row,text='Deforum flat-depth geometry',font=('Segoe UI',12,'bold')).pack(side='left')
         self.button(row,'Load preview image',self.load_image)
         self.preview=tk.Canvas(right,bg='#101923',height=330,highlightthickness=0);self.preview.pack(fill='both',expand=True,pady=5)
-        ttk.Label(right,text='Preview illustrates motion only. AI regeneration, depth warping and cadence can change the rendered result.').pack(anchor='w')
+        ttk.Label(right,text='Camera warp matched to your animation.py. AI regeneration and cadence blending are not simulated.').pack(anchor='w')
         row=ttk.Frame(right);row.pack(fill='x',pady=5)
         self.button(row,' Play',self.play);self.button(row,' Pause / Stop',self.stop);self.button(row,' Record',self.record);self.button(row,'Undo',self.undo)
         self.position_label=tk.StringVar();ttk.Label(row,textvariable=self.position_label).pack(side='right')
@@ -202,7 +204,12 @@ class App:
                 if v['attack']<=0 or v['release']<=0 or v['pulse_strength']<0:raise ValueError('Invalid pulse settings')
                 pulse=pulse_positions(self.env,self.env_times,n,self.fps,v['pulse_strength'],v['attack'],v['release'],v['threshold'],v['offset'],v['pulse_mode'])
             self.output,scale,clipped=combine(self.base+self.recorded,v['travel'],pulse,[x.get() for x in self.limits])
-            self.cumulative=np.cumsum(self.output,axis=0)
+            key=json.dumps({k:self.config.get(k) for k in ('W','H','use_depth_warping','enable_perspective_flip','shake_name','padding_mode','sampling_mode','fov_schedule','aspect_ratio_schedule','aspect_ratio_use_old_formula')},sort_keys=True)+str(n)
+            if self.geometry is not None and key==self.geometry_key:self.geometry.update_tracks(self.output)
+            else:
+                self.geometry=None;self.geometry_key=key
+                try:self.geometry=GeometryPreview(self.config,self.output.copy(),self.preview_image)
+                except ValueError as e:self.geometry_error=str(e)
             self.seek.configure(to=n-1)
             self.status.set(f'{n/self.fps:.2f} seconds | Pulse retained {scale*100:.0f}%'+(' | Some base/recorded movement was limited' if clipped else '')+(' | Enable pulse after loading audio' if self.env is not None and not v['pulse_enabled'] else ''))
             self.draw_graph();self.draw_preview();return True
@@ -228,7 +235,7 @@ class App:
         path=filedialog.askopenfilename(filetypes=[('Images','*.png *.jpg *.jpeg *.webp')])
         if path:
             with Image.open(path) as im:self.preview_image=im.convert('RGB')
-            self.draw_preview()
+            self.geometry=None;self.rebuild()
     def start_audio(self):
         if not self.audio_path or not Path(self.audio_path).exists():return
         try:
@@ -307,24 +314,16 @@ class App:
 
     def draw_preview(self):
         c=self.preview;c.delete('all');w=max(100,c.winfo_width());h=max(100,c.winfo_height())
-        if not hasattr(self,'cumulative'):return
-        f=min(self.frame,len(self.output)-1);x,y,z,rx,ry,rz=self.cumulative[f]
-        scale=float(np.clip(math.exp(np.clip(z/400,-2,2)),.2,5));angle=math.radians(rz)
-        ox=w/2+x*2+ry*2;oy=h/2-y*2-rx*2
-        if self.preview_image is not None:
-            im=self.preview_image.copy();im.thumbnail((int(w*.7),int(h*.7)))
-            im=im.resize((max(1,min(3000,int(im.width*scale))),max(1,min(3000,int(im.height*scale)))))
-            im=im.rotate(-rz,expand=True,resample=Image.Resampling.BICUBIC)
-            self.tk_image=ImageTk.PhotoImage(im);c.create_image(ox,oy,image=self.tk_image)
-        else:
-            def pt(a,b):
-                return ox+scale*(a*math.cos(angle)-b*math.sin(angle)),oy+scale*(a*math.sin(angle)+b*math.cos(angle))
-            for j in range(-5,6):
-                c.create_line(*pt(j*35,-175),*pt(j*35,175),fill='#284453')
-                c.create_line(*pt(-175,j*35),*pt(175,j*35),fill='#284453')
-            c.create_oval(ox-25*scale,oy-25*scale,ox+25*scale,oy+25*scale,outline='#48c9b0',width=3)
-        c.create_line(w/2-8,h/2,w/2+8,h/2,fill='#ddd');c.create_line(w/2,h/2-8,w/2,h/2+8,fill='#ddd')
-        c.create_text(12,15,anchor='nw',fill='white',text='Approximation | camera transform, not an AI render')
+        f=min(self.frame,len(self.output)-1)
+        if self.geometry is not None:
+            try:
+                im=self.geometry.seek(f)
+                im.thumbnail((max(16,w-30),max(16,h-50)),Image.Resampling.LANCZOS)
+                self.tk_image=ImageTk.PhotoImage(im);c.create_image(w/2,h/2+10,image=self.tk_image)
+                title=f'Native {self.geometry.width}x{self.geometry.height} | FOV {self.geometry.fov[f]:.1f} | aspect {self.geometry.aspect[f]:.3f} | frame-by-frame warp'
+            except ValueError as e:title=str(e)
+        else:title=getattr(self,'geometry_error','Loading geometry...')
+        c.create_text(12,12,anchor='nw',fill='white',width=max(80,w-24),text=title)
         self.position_label.set(f'Frame {f} / {len(self.output)-1}   |   {f/self.fps:.2f}s'+('   RECORDING' if self.recording else ''))
         self.draw_graph(cursor_only=True)
     def draw_graph(self,cursor_only=False):

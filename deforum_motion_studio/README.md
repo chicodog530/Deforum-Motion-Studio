@@ -1,4 +1,4 @@
-# Deforum Motion Studio 0.1
+# Deforum Motion Studio 0.2
 
 A standalone Windows 11 desktop app for creating 3D Deforum camera schedules.
 Includes your supplied successful configuration as the starting baseline.
@@ -17,14 +17,18 @@ Keep all the files together. Python 3.10 is also supported by the installer.
 
 1. The app opens the supplied baseline automatically. Its missing roll-schedule comma is repaired in memory. The original file remains unchanged.
 2. In Presets, choose **Wave**, strength **0.25**, cycle **8 seconds**, fade **1 second**; click **Apply preset**.
-3. Click **Play** to see an approximate camera preview. Load a picture if preferred.
+3. Click **Play** to see the calibrated flat-depth camera preview. Load a picture if preferred.
 4. Click **Export to Deforum** and save a new settings `.txt`.
 5. In Forge's Deforum tab, use **Load All Settings** to load the exported file using your usual settings-file control.
 6. Render a short section first. Judge actual smearing and adjust the limits/strength before rendering a whole soundtrack.
 
 For a quick music test, load **examples/demo_bass.wav** in the Bass pulse tab. This is an included synthetic bass-hit track, not copyrighted music.
 
-The preview is a fast illustration, not a Deforum rendering simulation. It approximates translation, rotation and travel with a transformed image/grid. It does not reproduce depth reconstruction, AI regeneration, FOV-dependent projection or cadence interpolation. Use actual renders to judge quality. Positive Z is presented as forward travel; verify the visual direction in your installed extension and use a negative value if required.
+The preview now reproduces the **flat-depth geometric warp** in the `animation.py` you supplied: translation scale 1/200, XYZ rotation order, FOV/aspect schedules, projection offsets, pixel-center conventions, and repeated frame-by-frame image warping. It uses the actual configured video resolution, then fits the result into the preview panel while preserving the video's proportions. Frame 0 is the initial image; movement starts at frame 1. There is no arbitrary preview magnification.
+
+OpenCV performs sampling rather than Torch: its interpolation tables round coordinates to 1/32 pixel, so pixel values can differ slightly, especially after repeated warps. This preview is calibrated geometry, not a bit-identical rendering of Torch's sampler or an AI-generated video. AI regeneration, changing depth maps, cadence blending, noise, color changes and hybrid optical flow are not simulated. The preview refuses to show a calibrated prediction with depth warping, perspective flip or Shakify enabled. Your supplied baseline disables these features. Keep cadence 1 for the clearest initial render comparison.
+
+FOV and aspect ratio are read from the loaded config. Change them in Forge and save/reload that config if needed. A loaded preview photo is resized to the configured video dimensions and warped as the starting frame. Strong push-and-return schedules can cause residual geometric drift because the image-warp operations are not exact inverses; the preview intentionally shows this instead of resetting the image artificially.
 
 ## Presets and continuous travel
 
@@ -92,9 +96,9 @@ Save project creates a `.dms.json` file with your original config, editable base
 
 ## Validation and limitations
 
-Run `python -m unittest -v test_motion.py` to check baseline import, repairs, expression validation, future-keyframe interpolation, presets, audio band filtering, pulse return, headroom limits, retiming and preservation of non-motion settings.
+Run `python -m unittest -v test_motion.py test_geometry.py` to check baseline import, repairs, expression validation, future-keyframe interpolation, presets, audio band filtering, pulse return, headroom limits, retiming, preservation of non-motion settings, and calibrated geometry/projection/sampling conventions.
 
-Development checks validate the motion engine and exports. A desktop GUI smoke test also checks launch, preset/undo, mouse recording, project save/open, export, soundtrack analysis/playback and rendering of all four tabs. Native Xbox input and Forge render quality require testing on your Windows machine. This is version 0.1, intended for that first practical test.
+Development checks validate the motion engine and exports. A desktop GUI smoke test also checks launch, preset/undo, mouse recording, project save/open, export, soundtrack analysis/playback and rendering of all four tabs. Native Xbox input and final AI render quality require testing on your Windows machine. This is version 0.2, intended for that first practical test.
 
 References:
 - https://github.com/deforum/sd-webui-deforum/wiki/Animation-Settings
