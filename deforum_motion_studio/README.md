@@ -1,7 +1,23 @@
-# Deforum Motion Studio 0.2
+# Deforum Motion Studio 0.3
 
 A standalone Windows 11 desktop app for creating 3D Deforum camera schedules.
 Includes your supplied successful configuration as the starting baseline.
+
+## What's new in 0.3
+
+- **Sound channels**: the old single bass pulse is now a channel list. Each
+  channel watches its own frequency band (bass, snare, crash, ...) and drives
+  its own motion axis with its own pulse shape, threshold, timing and
+  start/end range. Channels may overlap; overlapping pulses on one axis add.
+  Ships with Bass / Snare / Crash presets (snare and crash disabled by default).
+- **Smaller exports**: the exporter now writes error-bounded keyframes instead
+  of one keyframe per frame (max deviation 1e-4, far below visible).
+- **Dark mode**: toggle in the top bar, remembered between sessions.
+- **Playback robustness**: control changes are coalesced to one rebuild per UI
+  tick and the preview catch-up chain is guarded, so adjusting settings or
+  hitting rewind mid-playback no longer freezes the UI.
+- Project files are now version 2; v0.2 projects open with the old bass pulse
+  migrated into a single Bass channel.
 
 ## Install and launch
 
@@ -32,29 +48,78 @@ FOV and aspect ratio are read from the loaded config. Change them in Forge and s
 
 ## Presets and continuous travel
 
-Built-ins: Still, Gentle drift, Wave, Spiral, Figure eight, Rocking, Push in and Pull out.
+Built-ins: Still, Gentle drift, Wave, Spiral, Figure eight, Rocking, Push in and Pull out,
+plus two music-video moves: **Reveal drift** (starts close, pulls back to reveal while drifting
+sideways, pushes back in) and **Fly-through** (steady forward push with a continuous lateral weave).
+With **Auto-add Bass pulse + Mid ripple channels** checked, applying Reveal drift or Fly-through
+also sets up a Bass pulse channel (35–180 Hz → Travel) and a Mid Ripple channel (1–4 kHz → Travel):
+each detected mid-range hit launches a decaying waterdrop-style wobble on the zoom.
 
 Set strength, cycle duration, fade time and start/end seconds. End **0** means the full video. **Replace** replaces motion and clears the controller take in that range; **Add** layers the preset over existing motion. Clicking Apply is required. Numerical spinboxes also accept typed values.
 
 Continuous **Travel** is added to the current Z schedule, including presets and recordings. To start with only constant travel, apply Still first, then set Travel. Positive/negative values select opposite directions. Click Play or Update pulse to recompute typed controls.
 
-Save/load custom presets as `.preset.json`. Custom presets contain the base motion plus controller take; bass pulses and the additional Travel control remain project-level effects.
+Save/load custom presets as `.preset.json`. Custom presets contain the base motion plus controller take; sound channels and the additional Travel control remain project-level effects.
 
-## Music and bass pulse
+## Sound channels
 
-1. In Bass pulse, load MP3, WAV, FLAC, OGG or M4A.
-2. The app filters the audio to **35–180 Hz** by default. Change the band and click Re-analyze bass if desired.
-3. Choose Beat hits or Bass intensity. Enable camera pulse to compose it with your movement.
-4. Start with pulse distance **2**, attack **0.08 s**, return **0.22 s**. Adjust while previewing.
-5. Threshold controls detection of bass peaks. A higher value selects louder peaks. Positive timing offset delays the visual pulse. Beat hits are detected bass peaks, not guaranteed musical beat/downbeat recognition; sustained bass may work better with Bass intensity.
+1. In Sound channels, load MP3, WAV, FLAC, OGG or M4A.
+2. Pick a channel in the list (Bass, Snare, Crash, or Add your own). Each
+   channel has its own frequency band, detection mode, target axis, strength,
+   attack/return, threshold, timing offset and start/end range.
+3. Click **Re-analyze channels** (or **Sample soundtrack** to play the song
+   while it analyzes — the original bass-pulse workflow). Audio is decoded
+   once at 22.05 kHz and each enabled channel gets its own band envelope, so
+   snare crack (~1.5–6 kHz) and crash wash (~6–11 kHz) are detectable
+   alongside bass.
+4. Choose **Beat hits** (detects peaks, with adjustable min gap between hits),
+   **Bass intensity** (continuous energy follower), or **Ripple** (each hit
+   launches a decaying waterdrop-style oscillation — great for mid-range
+   hits rippling the zoom). Enable the channel to compose it with your movement.
+5. **Start/end** pick where the effect applies; end 0 means the full video.
+   Channels may overlap freely — pulses on the same axis add together, with a
+   short taper at range edges so channels never click the motion.
+6. Changing a channel's **low/high cutoff** automatically re-analyzes that
+   channel from the cached audio (no need to re-decode); its old envelope is
+   dropped the moment the band changes, so what you see is always what the
+   channel is actually listening to.
 
-Pulse distance is a relative position offset, not meters. The engine converts this offset into per-frame Z increments. It returns to the underlying moving path mathematically, rather than just setting Z speed to zero. Image warping/regeneration is not perfectly reversible, so actual pictures can retain artifacts.
+Each pulse returns to the underlying moving path mathematically rather than
+just setting speed to zero, and respects the per-axis speed limits: if headroom
+is low the pulse is scaled uniformly to preserve its push/return balance. The
+status bar shows the retained percentage. Overlapping channels each report
+their own scale; the worst case is shown.
 
-The combined movement respects the per-axis speed limits. If there is insufficient Z headroom, the **whole pulse** is reduced uniformly to preserve its push/return balance. The status bar shows the retained percentage. Increase the Travel/distance limit in Controller if you need stronger bass movement; begin with short render tests. Base/recording motion exceeding the limits is clipped and reported.
+The soundtrack is analyzed up to the project's duration. Re-analyze after
+extending duration. Full-song audio decoding is not repeated for every
+parameter tweak. Optional playback uses pygame: seeked playback supports
+MP3/OGG; start at frame 0 for other formats. Preview/audio alignment is
+approximate; exported schedules use frame time, independent of render speed.
 
-The soundtrack is analyzed up to the project's duration. Re-analyze after extending duration. Full-song audio decoding is not repeated for every parameter tweak. Optional playback uses pygame: seeked playback supports MP3/OGG; start at frame 0 for other formats. Preview/audio alignment is approximate; exported schedules use frame time, independent of render speed.
+**Attach soundtrack path to exported config** optionally sets Deforum's
+soundtrack fields. The audio file must remain accessible at that path on the
+rendering PC. Otherwise add the same track afterward in your video editor,
+starting at the matching time.
 
-**Attach soundtrack path to exported config** optionally sets Deforum's soundtrack fields. The audio file must remain accessible at that path on the rendering PC. Otherwise add the same track afterward in your video editor, starting at the matching time.
+**Export safety:** if the soundtrack is loaded but an enabled channel was
+never analyzed (e.g. you enabled it after analyzing, or the analysis was
+still running), the app warns you before exporting instead of silently
+writing a file with no pulse effects.
+
+## Spectrum view
+
+To the right of the motion graph, the spectrum analyzer shows the soundtrack's
+peak-hold spectrum on a log frequency axis (0 dB = loudest), drawn vertically:
+the top is the highest frequency, the bottom is bass. Each enabled channel's
+frequency band is shaded in its color as a horizontal span, with a marker line
+at the actual detected peak frequency inside that band — so you can see at a
+glance whether a channel is really sitting on bass, mids or highs.
+
+Click any peak in the spectrum to read its exact frequency, bass/mid/high
+class and level. Double-click (or the **New channel at cursor** button) to
+create a channel with its band centered on that peak — then pick its target
+axis in the channel editor and Re-analyze. The spectrum is saved with the
+project, so it survives reloads without the audio file.
 
 ## Xbox controller and mouse recording
 
@@ -78,7 +143,7 @@ Seek to a frame and click Record. Checked axes replace the previous controller t
 
 Defaults: ±0.3 for lateral/vertical translation and rotations; ±1.75 for Z travel. Each axis has its own adjustable limit, including Z for stronger pulses. Imported baseline rotations up to ±0.5 are retained in the editable source but limited to the current output limit. Raise the relevant limit to reproduce them. These are user-tuned starting limits, not a guarantee against smearing.
 
-Apply timing changes retimes existing motion approximately to preserve per-second movement. New time beyond the existing motion becomes still. Exact integer-frame schedules are exported, so long videos produce larger settings files. The initial version supports 2–30,000 frames and 1–120 FPS.
+Apply timing changes retimes existing motion approximately to preserve per-second movement. New time beyond the existing motion becomes still. Exports write reduced keyframes (linear interpolation reproduces the motion within 1e-4), so files stay small even for long videos. The initial version supports 2–30,000 frames and 1–120 FPS.
 
 The supplied baseline is 800 frames, 24 FPS, 768×1120, 3D, cadence 3, depth warping disabled. Other rendering settings remain unchanged unless you deliberately change timing or attach a soundtrack. Depth/FOV/cadence affect the final response; very short pulses may not look as expected with cadence 3. Consider testing a copy at cadence 1 in Forge to compare; the app does not automatically change it.
 
@@ -92,13 +157,13 @@ Configs with a nonempty Parseq manifest are blocked at export because Parseq may
 
 ## Saving and backup
 
-Save project creates a `.dms.json` file with your original config, editable base motion, controller take, settings and bass analysis. Open project restores it. Your soundtrack and preview picture are not embedded. Keep the soundtrack and project together in your backups; reload the soundtrack if its path changes. Back up custom `.preset.json` files too.
+Save project creates a `.dms.json` file with your original config, editable base motion, controller take, settings and per-channel audio analysis. Open project restores it. Your soundtrack and preview picture are not embedded. Keep the soundtrack and project together in your backups; reload the soundtrack if its path changes. Back up custom `.preset.json` files too.
 
 ## Validation and limitations
 
-Run `python -m unittest -v test_motion.py test_geometry.py` to check baseline import, repairs, expression validation, future-keyframe interpolation, presets, audio band filtering, pulse return, headroom limits, retiming, preservation of non-motion settings, and calibrated geometry/projection/sampling conventions.
+Run `python -m unittest -v test_motion.py test_geometry.py` to check baseline import, repairs, expression validation, future-keyframe interpolation, presets, keyframe reduction, multi-channel pulse combine and windowing, channel validation, audio band filtering, pulse return, headroom limits, retiming, preservation of non-motion settings, and calibrated geometry/projection/sampling conventions.
 
-Development checks validate the motion engine and exports. A desktop GUI smoke test also checks launch, preset/undo, mouse recording, project save/open, export, soundtrack analysis/playback and rendering of all four tabs. Native Xbox input and final AI render quality require testing on your Windows machine. This is version 0.2, intended for that first practical test.
+Development checks validate the motion engine and exports. A desktop GUI smoke test also checks launch, preset/undo, mouse recording, project save/open, export, soundtrack analysis/playback and rendering of all four tabs. Native Xbox input and final AI render quality require testing on your Windows machine. This is version 0.3.
 
 References:
 - https://github.com/deforum/sd-webui-deforum/wiki/Animation-Settings

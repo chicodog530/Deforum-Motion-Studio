@@ -8,3 +8,80 @@
 - Camera coordinate/projection tests pass independently. OpenCV sampler quantization explains the small pixel differences; repeated sampling can accumulate them.
 - This validates flat-depth image geometry. AI regeneration, cadence blending, Shakify, depth estimation and final Forge video appearance are not reproduced.
 - No arbitrary preview magnification is applied. Native configured dimensions and portrait proportions are retained.
+
+# v0.3 validation
+
+- 26 automated motion/geometry tests passed (18 motion incl. keyframe
+  reduction, multi-channel combine/windowing/validation; 8 geometry).
+- Headless GUI smoke test (28 checks) passed under Xvfb: launch, default
+  channels, channel add/duplicate/remove, per-channel editing with debounced
+  rebuild, dark/light theme toggle with settings persistence, project v2
+  save/open, v0.2 project migration (bass pulse -> Bass channel), undo of
+  channel edits, export->reload roundtrip (max error 4.74e-9 on the baseline;
+  37 keyframes vs 4800 previously), play/stop/rewind, baseline repair import.
+- Export keyframe bound verified: worst-case deviation 1e-4 in Deforum units
+  (~0.0002 px translation, 1e-4 deg rotation), far below the preview's own
+  +-1/32 px OpenCV sampler quantization.
+- Native Xbox input, real soundtrack analysis and final AI render quality
+  still require testing on the Windows machine.
+
+# v0.3.1 validation (spectrum view)
+
+- spectrum_db unit test: 440 Hz tone peaks within one log bin, 0 dB normalized.
+- Headless GUI smoke test additions (6 checks): spectrum click sets cursor
+  frequency and readout, double-click/button creates a channel with its band
+  bracketing the cursor, canvas redraws with cursor marker.
+- freq_class unit test: 60/249 Hz bass, 250/1000 Hz mid, 2000/5000 Hz high.
+
+# v0.3.2 validation (band-change auto re-analysis)
+
+- Root-caused a stale-envelope bug from a user screenshot: editing a
+  channel's low/high cutoff never re-analyzed, so the channel kept the old
+  band's envelope while displaying the new band. Fix: band edits clear the
+  envelope immediately and recompute it from cached decoded audio (debounced
+  800 ms while typing); full re-decode only happens on Re-analyze channels.
+- Headless GUI smoke test additions (8 checks): full mp3 analysis end to end,
+  audio cache, transient invalid band ignored, stale envelope cleared on band
+  change, re-analysis completes with new band recorded and a genuinely
+  different envelope.
+
+# v0.3.3 validation (vertical spectrum)
+
+- Spectrum moved from a horizontal strip to a vertical analyzer on the right
+  of the motion graph: top = highest frequency, bottom = bass. Channel bands
+  are horizontal shaded spans with peak-frequency marker lines.
+- Headless GUI smoke checks: click near top yields >2 kHz, near bottom
+  yields <250 Hz. Canvas geometry verified numerically: 10k grid label above
+  50 Hz, bass band rect below snare band rect, peak markers inside their
+  channel bands.
+
+# v0.3.4 validation (pulse export safety + sample soundtrack)
+
+- Lean data-path repro (no GUI): decode 30s mp3 at 22050 Hz -> bass envelope
+  -> channel_pulse -> combine_multi with recorded X motion -> export ->
+  parse back. File Z max 1.75 (714 samples |z|>0.2), matches app output
+  exactly: the pulse reaches the file whenever analysis completed.
+- Root cause of "render has xbox motion but no pulse": the app silently
+  exported when an enabled channel had no envelope (e.g. enabled after
+  analyzing, or analysis still running). Fix: export now warns and names the
+  un-analyzed channels, with Export anyway / cancel.
+- Restored the original "Sample soundtrack" button (play + analyze).
+- Fixed decode_audio's default sample rate (8000 -> CHANNEL_SR); the app
+  always passed 22050 explicitly, but the default was a footgun.
+- Smoke +4: decode default, export asks on missing pulse, cancel skips file
+  dialog, export-anyway writes, sample triggers analysis + playback.
+
+# v0.3.5 validation (TikTok-style music presets + Ripple mode)
+
+- Watched the user's two TikTok clips frame by frame: both are pure
+  translation moves — slow Z push/pull reveals with lateral drift (skulls),
+  steady forward push with a continuous weave (city). Built matching
+  presets: 'Reveal drift' (Z in/out + X drift) and 'Fly-through'
+  (constant Z push + X weave + Y bob).
+- New 'Ripple' channel mode: each detected hit launches a damped cosine
+  (~1 wobble per release time constant, ~3-4 visible rings), verified to
+  oscillate both ways and decay.
+- Presets tab checkbox "Auto-add Bass pulse + Mid ripple channels": applying
+  Reveal drift / Fly-through configures Bass (35-180 Hz, Beat hits, Travel)
+  and creates a Mid Ripple channel (1-4 kHz, Ripple, Travel); re-running
+  never duplicates the ripple channel. End-to-end GUI check passes.
