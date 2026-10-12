@@ -40,6 +40,10 @@ Keep all the files together. Python 3.10 is also supported by the installer.
 
 For a quick music test, load **examples/demo_bass.wav** in the Bass pulse tab. This is an included synthetic bass-hit track, not copyrighted music.
 
+## Render / refine loop
+
+Render the video in Deforum, then load it back with **Load rendered video** and pick a view: **Wireframe**, **Video**, or **Split** (both side by side). The video panel shows the exact rendered frame for the current timeline frame — video and motion curves stay in lockstep, and scrubbing the graph scrubs the picture too. Watch it, find the weak spots, then punch in fixes: seek to the section, set an **A/B loop** around it (Set A / Set B, enable Loop A-B) to repeat it, hit Record and perform the new move while watching the render. Checked axes replace only the recorded range, so the rest of your motion is untouched. Export again and re-render: the export carries your original settings including the seed, so the imagery stays put and only the motion changes. The video path is saved in the project (the video file itself is not embedded — keep it next to the project). Picture only; the app keeps playing your loaded soundtrack for audio.
+
 The preview now reproduces the **flat-depth geometric warp** in the `animation.py` you supplied: translation scale 1/200, XYZ rotation order, FOV/aspect schedules, projection offsets, pixel-center conventions, and repeated frame-by-frame image warping. It uses the actual configured video resolution, then fits the result into the preview panel while preserving the video's proportions. Frame 0 is the initial image; movement starts at frame 1. There is no arbitrary preview magnification.
 
 OpenCV performs sampling rather than Torch: its interpolation tables round coordinates to 1/32 pixel, so pixel values can differ slightly, especially after repeated warps. This preview is calibrated geometry, not a bit-identical rendering of Torch's sampler or an AI-generated video. AI regeneration, changing depth maps, cadence blending, noise, color changes and hybrid optical flow are not simulated. The preview refuses to show a calibrated prediction with depth warping, perspective flip or Shakify enabled. Your supplied baseline disables these features. Keep cadence 1 for the clearest initial render comparison.
@@ -125,17 +129,21 @@ project, so it survives reloads without the audio file.
 
 Native Windows XInput is used. Connect an Xbox-compatible controller via USB or Bluetooth before recording. The connection status updates automatically. Controllers requiring a different API are not supported in this initial version.
 
+The **Gamepad** tab is the controller settings and test page. Every stick, trigger and button is assignable: sticks and triggers drive any of the six motion axes, buttons trigger Record, Stop, Undo or Play — or drive an axis while held, like the bumpers do for roll. Each stick/trigger/button has its own **Max** — the movement per second at full deflection — plus an invert toggle, so e.g. the left stick can be gentle on sideways movement while the triggers stay aggressive on travel. The right-hand column shows live values as you wiggle each control, so you can test the mapping before recording. The mapping is saved automatically per user (settings.json) and is independent of projects.
+
+The factory layout (also the Reset to defaults result):
+
 | Input | Movement |
 | --- | --- |
 | Left stick | Sideways / vertical |
 | Right stick | Turn / tilt |
 | Right / left trigger | Forward / backward |
-| Right / left bumper | Positive / negative roll |
+| Right / left bumper (hold) | Positive / negative roll |
 | A | Start recording |
 | B | Stop |
 | X when stopped | Undo |
 
-Sensitivity, dead zone and smoothing keep the useful range fine-grained. Mouse sliders provide the same movement when there is no controller. Sliders stay where you place them; click Center sliders to stop their input. Controller release approaches zero through smoothing. Recording captures a playback-time motion schedule; it does **not** steer Forge live during rendering.
+Stick dead zone and smoothing keep the useful range fine-grained; sensitivity now applies to the mouse sliders only, since each gamepad control carries its own max. **Stick response** sets the stick curve: 1 is linear past the dead zone (full stick always reaches the control's max), higher values soften the mid-range for finer small moves. Mouse sliders provide the same movement when there is no controller. Sliders stay where you place them; click Center sliders to stop their input. Controller release approaches zero through smoothing. Recording captures a playback-time motion schedule; it does **not** steer Forge live during rendering.
 
 Seek to a frame and click Record. Checked axes replace the previous controller take in that recorded range; unchecked axes preserve it. The take is an additional layer over the base schedule. Stop adds a brief deceleration tail where space remains. Undo restores the previous motion/controls; Clear recording removes only the take. Save project before major changes. Undo is limited to 15 snapshots and does not undo soundtrack replacement.
 

@@ -263,6 +263,8 @@ def validate_channel(ch):
         except (TypeError,ValueError): raise ValueError(f"Channel '{ch['name']}': {key} must be a number")
         if not np.isfinite(v): raise ValueError(f"Channel '{ch['name']}': {key} must be finite")
         ch[key]=min(hi,max(lo,v))
+    # The bandpass filter needs high strictly below Nyquist (CHANNEL_SR/2).
+    ch['high']=min(ch['high'],CHANNEL_SR/2-1)
     if not ch['low']<ch['high']:
         raise ValueError(f"Channel '{ch['name']}': low cutoff must be below high cutoff")
     if ch['end']!=0 and not ch['end']>ch['start']:

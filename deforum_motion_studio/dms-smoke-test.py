@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import app as appmod
 from motion import load_config, AXES
+from controller import button_action
 
 failures = []
 def check(name, cond):
@@ -217,6 +218,106 @@ check("fly-through motion applied", float(np.mean(a.base[60:180,2]))>0)
 # second apply must not duplicate the ripple channel
 a.apply_preset()
 check("no duplicate ripple channel", len([ch for ch in a.channels if ch['name'].lower()=='mid ripple'])==1)
+
+# 13. gamepad tab: mapping UI, live test readouts, per-control max, persistence
+saved_settings = appmod.SETTINGS_FILE.read_text() if appmod.SETTINGS_FILE.exists() else None
+try:
+    check("pad tab built", hasattr(a, 'pad_vars') and 'lx' in a.pad_vars and 'btn_a' in a.pad_vars)
+    check("default lx target", a.pad_vars['lx']['target'].get() == 'Move sideways')
+    check("default lx max", abs(a.pad_vars['lx']['max'].get() - 0.3) < 1e-9)
+    check("default A action", a.pad_vars['btn_a']['target'].get() == 'Record')
+    check("default bumpers roll", a.pad_vars['btn_lb']['target'].get() == 'Roll'
+          and a.pad_vars['btn_rb']['target'].get() == 'Roll'
+          and abs(a.pad_vars['btn_rb']['max'].get() - 0.3) < 1e-9)
+    check("expo default linear", abs(a.vars['expo'].get() - 1.0) < 1e-9)
+    # remap via UI: left stick X -> Travel / distance, max 0.5, inverted
+    a.pad_vars['lx']['target'].set('Travel / distance')
+    a.pad_vars['lx']['max'].set(0.5)
+    a.pad_vars['lx']['invert'].set(True)
+    root.update()
+    check("remap stored", a.pad_map['lx'] == {'target': 'axis:2', 'max': 0.5, 'invert': True})
+    d = json.loads(appmod.SETTINGS_FILE.read_text())
+    check("pad map persisted", d['pad_map']['lx']['target'] == 'axis:2' and d['pad_map']['lx']['max'] == 0.5)
+    # button remap via UI
+    a.pad_vars['btn_y']['target'].set('Play'); root.update()
+    check("button remap stored", a.pad_map['btn_y'] == {'target': 'action:play', 'max': 0.0, 'invert': False})
+    # button -> axis remap via UI (hold X to tilt)
+    a.pad_vars['btn_x']['target'].set('Tilt up / down'); root.update()
+    a.pad_vars['btn_x']['max'].set(0.4); root.update()
+    check("button axis remap", a.pad_map['btn_x']['target'] == 'axis:3'
+          and abs(a.pad_map['btn_x']['max'] - 0.4) < 1e-9)
+    check("button no action when axis", button_action(a.pad_map, 'x') == '')
+    # live test readouts with a fake controller
+    fake = {'lx': 1.0, 'ly': 0.0, 'rx': 0.0, 'ry': 0.0, 'lt': 0.0, 'rt': 0.0,
+            'buttons': 0x4000, 'label': 'fake'}
+    with mock.patch.object(a.controller, 'read_raw', return_value=fake):
+        a.tick(); root.update()
+    check("live stick value", a.pad_test_vars['lx'].get() == '+1.00')
+    check("live button pressed", a.pad_btn_test_vars['x'].get() == '●')
+    check("live button idle", a.pad_btn_test_vars['y'].get() == '○')
+    # mapped button action fires: X is Undo by default; empty stack -> silent no-op
+    check("undo no-op safe", a.undo() is None)
+    # reset restores defaults in UI and settings
+    a._reset_pad_map(); root.update()
+    check("reset restores lx", a.pad_vars['lx']['target'].get() == 'Move sideways'
+          and abs(a.pad_vars['lx']['max'].get() - 0.3) < 1e-9)
+finally:
+    if saved_settings is not None:
+        appmod.SETTINGS_FILE.write_text(saved_settings)
+
+# 14. review video: load, view toggle, frame sync, A/B loop, project roundtrip
+import cv2 as _cv2, time as _time
+with tempfile.TemporaryDirectory() as tmp:
+    p=str(Path(tmp)/'rev.mp4')
+    _vw=_cv2.VideoWriter(p,_cv2.VideoWriter_fourcc(*'mp4v'),24,(96,64))
+    for i in range(60):_vw.write(np.full((64,96,3),(i*3%256,0,0),np.uint8))
+    _vw.release()
+    check("video loads", a.set_video(p,quiet=True) and a.video is not None and a.video.n==60)
+    check("video mode on", a.preview_mode.get()=='video')
+    root.update()
+    check("video canvas shown", a.preview_video.winfo_ismapped() and not a.preview.winfo_ismapped())
+    a.tk_video=None;a.frame=10;a.draw_preview();root.update()
+    check("video frame rendered", a.tk_video is not None and a.tk_video.width()>0)
+    # split view shows both panels side by side
+    a.preview_mode.set('split');a.on_preview_mode();root.update()
+    check("split shows both", a.preview.winfo_ismapped() and a.preview_video.winfo_ismapped())
+    a.frame=20;a.draw_preview();root.update()
+    check("split draws both", a.tk_image is not None and a.tk_video is not None)
+    a.preview_mode.set('wireframe');a.on_preview_mode();root.update()
+    check("wireframe mode hides video", a.preview.winfo_ismapped() and not a.preview_video.winfo_ismapped())
+    p2=str(Path(tmp)/'rev30.mp4')
+    _vw=_cv2.VideoWriter(p2,_cv2.VideoWriter_fourcc(*'mp4v'),30,(96,64))
+    for i in range(60):_vw.write(np.zeros((64,96,3),np.uint8))
+    _vw.release()
+    with mock.patch.object(messagebox,'showwarning') as sw:a.set_video(p2)
+    check("fps mismatch warns", sw.called)
+    a.set_video(p,quiet=True)
+    # A/B loop wraps during review playback (not while recording).
+    # NOTE: check frame before root.update() — update() would keep
+    # dispatching the live after(20,tick) chain and never return.
+    a.frame=0;a.loop_a=5;a.loop_b=8;a.loop_on.set(True)
+    a.running=True;a.recording=False;a.clock=_time.monotonic()-0.6
+    a.tick()
+    check("loop wraps", a.frame==5)
+    a.running=False;a.loop_on.set(False);a.loop_a=a.loop_b=None
+    root.update()
+    # mode switch with no video prompts load; cancel falls back to wireframe
+    a.clear_video()
+    check("video cleared", a.video is None and a.preview_mode.get()=='wireframe')
+    with mock.patch.object(filedialog,'askopenfilename',return_value=''):
+        a.preview_mode.set('video');a.on_preview_mode();root.update()
+    check("video mode without video falls back", a.preview_mode.get()=='wireframe')
+    # project roundtrip keeps the video path and restores it
+    a.set_video(p,quiet=True)
+    pp=str(Path(tmp)/'v.dms.json')
+    with mock.patch.object(filedialog,'asksaveasfilename',return_value=pp):
+        a.save_project()
+    check("video path saved", json.loads(Path(pp).read_text())['video_path']==p)
+    a.clear_video()
+    with mock.patch.object(filedialog,'askopenfilename',return_value=pp):
+        a.open_project()
+    check("video restored on open", a.video is not None and a.video_path==p)
+    a.clear_video()
 
 a.close()
 print()

@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 import numpy as np
 from motion import *
-from controller import curve
+from controller import (curve,Controller,default_pad_map,validate_pad_map,
+                        pad_axis_target,button_action)
+from video_review import VideoReview
 
 class MotionTests(unittest.TestCase):
     def test_baseline_and_repair(self):
@@ -110,6 +112,40 @@ class MotionTests(unittest.TestCase):
         for bad in ({'mode':'nope'},{'low':5000,'high':100,'mode':'Beat hits'},
                     {'axis':9,'mode':'Beat hits'},{'start':5.,'end':2.,'mode':'Beat hits'}):
             with self.assertRaises(ValueError):validate_channel(dict(DEFAULT_CHANNELS[0],**bad))
+    def test_high_cutoff_nyquist_clamp(self):
+        # Screenshot case: 8800/11050 must not error; high clamps under Nyquist.
+        ch=validate_channel(dict(DEFAULT_CHANNELS[0],name='Crash',low=8800,high=11050))
+        self.assertLess(ch['high'],11025)
+        self.assertLess(ch['low'],ch['high'])
+        env,times=bass_envelope(np.random.default_rng(0).standard_normal(22050),22050,
+                                ch['low'],ch['high'])
+        self.assertGreater(len(env),0)
+
+class VideoReviewTests(unittest.TestCase):
+    def _make(self,path,n=60,fps=24):
+        import cv2
+        vw=cv2.VideoWriter(str(path),cv2.VideoWriter_fourcc(*'mp4v'),fps,(96,64))
+        for i in range(n):
+            vw.write(np.full((64,96,3),(i*3%256,0,0),np.uint8))  # index in blue
+        vw.release()
+    def test_sequential_and_seek(self):
+        import cv2
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/'rev.mp4';self._make(p)
+            v=VideoReview(p)
+            try:
+                self.assertEqual(v.n,60);self.assertAlmostEqual(v.fps,24)
+                self.assertEqual(v.frame(0).shape,(64,96,3))
+                def blue(i):return float(v.frame(i)[...,2].mean())
+                self.assertLess(abs(blue(0)-0),25)
+                self.assertLess(abs(blue(30)-90),25)   # seek lands right
+                self.assertLess(abs(blue(29)-87),25)   # seek back works
+                self.assertLess(abs(blue(31)-93),25)   # sequential fast path
+                self.assertLess(abs(blue(59)-177),25)
+                self.assertLess(abs(blue(999)-177),25) # clamped to last
+            finally:v.close()
+    def test_bad_path(self):
+        with self.assertRaises(ValueError):VideoReview('/nonexistent/x.mp4')
     def test_fps_change(self):
         x=np.ones((240,6))*.1;y=resample(x,24,480,48)
         self.assertAlmostEqual(y[10,0],.05)
@@ -151,5 +187,63 @@ class MotionTests(unittest.TestCase):
         self.assertGreater(pos.max(),0.5)  # punches out first
         seg=np.abs(pos[12:60])
         self.assertGreater(np.max(seg[:15]),np.max(seg[30:]))  # decays
+
+class PadMapTests(unittest.TestCase):
+    def test_read_raw_keys(self):
+        r=Controller().read_raw()
+        for k in ('lx','ly','rx','ry','lt','rt','buttons','label'):
+            self.assertIn(k,r)
+    def test_default_map(self):
+        m=default_pad_map([.3,.3,1.75,.3,.3,.3])
+        self.assertEqual(m['lx'],{'target':'axis:0','max':.3,'invert':False})
+        self.assertEqual(m['lt']['target'],'axis:2');self.assertTrue(m['lt']['invert'])
+        self.assertFalse(m['rt']['invert'])
+        self.assertEqual(m['btn_lb'],{'target':'axis:5','max':.3,'invert':True})
+        self.assertEqual(m['btn_rb']['target'],'axis:5')
+        self.assertEqual(button_action(m,'a'),'record')
+        self.assertEqual(button_action(m,'b'),'stop')
+        self.assertEqual(button_action(m,'x'),'undo')
+        self.assertEqual(button_action(m,'y'),'')
+        self.assertEqual(button_action(m,'lb'),'')
+    def test_pad_axis_target(self):
+        m=default_pad_map([.3,.3,1.75,.3,.3,.3])
+        t=pad_axis_target({'lx':1.,'ly':0.,'rx':0.,'ry':0.,'lt':0.,'rt':1.},m,.15)
+        self.assertAlmostEqual(t[0],.3)    # full left stick X -> its max
+        self.assertAlmostEqual(t[2],1.75)  # full right trigger
+        t=pad_axis_target({'lx':0.,'ly':0.,'rx':0.,'ry':0.,'lt':1.,'rt':0.},m,.15)
+        self.assertAlmostEqual(t[2],-1.75) # inverted left trigger pulls back
+        t=pad_axis_target({'lx':.05,'ly':0.,'rx':0.,'ry':0.,'lt':0.,'rt':0.},m,.15)
+        self.assertAlmostEqual(t[0],0.)    # inside dead zone
+        m2={'lx':{'target':'axis:1','max':.5,'invert':False}}
+        t=pad_axis_target({'lx':1.,'ly':0.,'rx':0.,'ry':0.,'lt':0.,'rt':0.},m2,.15)
+        self.assertAlmostEqual(t[1],.5);self.assertAlmostEqual(t[0],0.)
+    def test_response_curve(self):
+        m={'lx':{'target':'axis:0','max':1.,'invert':False}}
+        raw={'lx':.5,'ly':0.,'rx':0.,'ry':0.,'lt':0.,'rt':0.}
+        lin=pad_axis_target(raw,m,.15,power=1.)[0]
+        self.assertAlmostEqual(lin,(.5-.15)/.85)          # linear past dead zone
+        soft=pad_axis_target(raw,m,.15,power=1.7)[0]
+        self.assertLess(soft,lin)                          # expo softens mid-range
+        full=pad_axis_target(dict(raw,lx=1.),m,.15,power=1.7)[0]
+        self.assertAlmostEqual(full,1.)                    # full deflection unaffected
+    def test_button_axis(self):
+        m={'btn_rb':{'target':'axis:5','max':.2,'invert':False},
+           'btn_lb':{'target':'axis:5','max':.2,'invert':True}}
+        base={'lx':0.,'ly':0.,'rx':0.,'ry':0.,'lt':0.,'rt':0.,'buttons':0}
+        t=pad_axis_target(dict(base,buttons=0x200),m,.15)
+        self.assertAlmostEqual(t[5],.2)    # RB held -> full max
+        t=pad_axis_target(dict(base,buttons=0x100),m,.15)
+        self.assertAlmostEqual(t[5],-.2)   # LB held -> inverted
+        t=pad_axis_target(base,m,.15)
+        self.assertAlmostEqual(t[5],0.)    # released -> nothing
+    def test_validate_repairs(self):
+        bad={'lx':{'target':'axis:9','max':'junk','invert':1},
+             'btn_a':{'target':'action:fly'},'nope':1}
+        m=validate_pad_map(bad,[.3,.3,1.75,.3,.3,.3])
+        self.assertEqual(m['lx']['target'],'')
+        self.assertEqual(m['lx']['max'],0.)
+        self.assertEqual(m['btn_a']['target'],'')
+        self.assertIn('btn_b',m)  # missing entries filled from defaults
+        self.assertEqual(validate_pad_map(None,[.3]*6)['lx']['target'],'axis:0')
 
 if __name__=='__main__':unittest.main()

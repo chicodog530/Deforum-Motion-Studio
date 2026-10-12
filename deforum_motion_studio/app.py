@@ -15,7 +15,9 @@ from motion import (AXES,LABELS,LIMITS,PRESETS,CHANNEL_MODES,DEFAULT_CHANNELS,CH
                     load_config,parse_schedule,preset,keyframe_indices,
                     decode_audio,bass_envelope,spectrum_db,freq_class,pulse_positions,channel_pulse,validate_channel,
                     combine,combine_multi,export_config,resample)
-from controller import Controller
+from controller import (Controller,STICK_INPUTS,BUTTON_INPUTS,BUTTON_BITS,ACTIONS,
+                        default_pad_map,validate_pad_map,pad_axis_target,button_action)
+from video_review import VideoReview
 from geometry import GeometryPreview
 
 ROOT=Path(__file__).resolve().parent
@@ -27,15 +29,22 @@ class App:
     def __init__(self,root):
         self.root=root;root.title('Deforum Motion Studio 0.3');root.geometry('1250x900')
         root.minsize(1050,850)
-        # Persistent UI settings (theme); failures fall back to defaults.
-        dark=True
-        try: dark=bool(json.loads(SETTINGS_FILE.read_text(encoding='utf-8')).get('dark_mode',True))
+        # Persistent UI settings (theme, gamepad mapping); failures fall back to defaults.
+        dark=True;pad_map=None
+        try:
+            _settings=json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
+            dark=bool(_settings.get('dark_mode',True));pad_map=_settings.get('pad_map')
         except Exception: pass
         self.dark=tk.BooleanVar(value=dark)
+        self.pad_map=validate_pad_map(pad_map,LIMITS)
         style=ttk.Style();style.theme_use('clam')
         self.config={};self.base=np.zeros((800,6));self.recorded=np.zeros_like(self.base)
         self.output=self.base.copy();self.fps=24.;self.frame=0;self.running=False;self.recording=False
         self.audio_path='';self.preview_image=None;self.tk_image=None
+        self.video_path='';self.video=None;self.loop_a=None;self.loop_b=None
+        self.preview_mode=tk.StringVar(value='wireframe');self.loop_on=tk.BooleanVar(value=False)
+        self._video_key=None;self._video_ok=False;self._preview_mode_shown=None
+        self.tk_video=None
         self.channels=[];self.reset_channels();self.spectrum=None;self.spec_cursor_f=None
         self._audio_cache=None;self._reanalyze_after=None
         self.undo_stack=[];self.controller=Controller();self.pad_smooth=np.zeros(6);self.last_buttons=0
@@ -51,6 +60,7 @@ class App:
         self.last_tick=time.monotonic();self.root.after(20,self.tick)
         self.root.after(150,self.rebuild)
         self.preview.bind('<Configure>',lambda e:self.draw_preview())
+        self.preview_video.bind('<Configure>',lambda e:self.draw_preview())
         self.graph.bind('<Configure>',lambda e:self.draw_graph())
         root.protocol('WM_DELETE_WINDOW',self.close)
 
@@ -108,7 +118,7 @@ class App:
         ttk.Label(r,text='Detection',width=15).pack(side='left')
         self._ch_var('mode',CHANNEL_MODES[0]);ttk.Combobox(r,textvariable=self.ch_vars['mode'],values=CHANNEL_MODES,state='readonly',width=13).pack(side='right')
         for label,key,low,high,step in [
-                ('Low cutoff (Hz)','low',10,12000,50),('High cutoff (Hz)','high',20,12000,50),
+                ('Low cutoff (Hz)','low',10,12000,50),('High cutoff (Hz)','high',20,11024,50),
                 ('Strength','strength',0,30,.25),('Attack (s)','attack',.01,2,.01),
                 ('Return (s)','release',.02,2,.01),('Threshold (0-1)','threshold',.05,1,.05),
                 ('Timing offset (s)','offset',-5,5,.01),('Min gap (s)','min_gap',.02,5,.01),
@@ -126,6 +136,108 @@ class App:
         self._refresh_channel_list()
         if self.channels:self._select_only(0);self._select_channel()
 
+    def build_gamepad_tab(self,g):
+        ttk.Label(g,text='Gamepad mapping & test',font=('Segoe UI',12,'bold')).pack(anchor='w')
+        ttk.Label(g,text='Assign each stick, trigger and button. Wiggle the controller: live values appear on the right. Max = movement per second at full deflection, set per control.',wraplength=380).pack(anchor='w',pady=4)
+        self._pad_loading=True
+        self.pad_vars={};self.pad_test_vars={};self.pad_btn_test_vars={}
+        axis_names=['Unassigned']+list(LABELS)
+        for inp,label in STICK_INPUTS:
+            row=ttk.Frame(g);row.pack(fill='x',pady=1)
+            ttk.Label(row,text=label,width=13).pack(side='left')
+            tvar=tk.StringVar()
+            ttk.Combobox(row,textvariable=tvar,values=axis_names,state='readonly',width=14).pack(side='left')
+            tvar.trace_add('write',lambda *a:self._pad_map_edited())
+            ttk.Label(row,text='Max',padding=(6,0)).pack(side='left')
+            mvar=tk.DoubleVar()
+            ttk.Spinbox(row,textvariable=mvar,from_=0,to=30,increment=.05,width=6).pack(side='left')
+            mvar.trace_add('write',lambda *a:self._pad_map_edited())
+            ivar=tk.BooleanVar();ttk.Checkbutton(row,text='Inv',variable=ivar,width=5).pack(side='left')
+            ivar.trace_add('write',lambda *a:self._pad_map_edited())
+            live=tk.StringVar(value='+0.00')
+            ttk.Label(row,textvariable=live,width=7).pack(side='right')
+            self.pad_vars[inp]={'target':tvar,'max':mvar,'invert':ivar}
+            self.pad_test_vars[inp]=live
+        ttk.Separator(g).pack(fill='x',pady=8)
+        ttk.Label(g,text='Buttons (action, or hold to drive an axis)',font=('Segoe UI',11,'bold')).pack(anchor='w')
+        btn_targets=['Unassigned']+[lbl for _,lbl in ACTIONS]+list(LABELS)
+        for b,label in BUTTON_INPUTS:
+            row=ttk.Frame(g);row.pack(fill='x',pady=1)
+            ttk.Label(row,text=label,width=13).pack(side='left')
+            avar=tk.StringVar()
+            ttk.Combobox(row,textvariable=avar,values=btn_targets,state='readonly',width=14).pack(side='left')
+            maxframe=ttk.Frame(row);maxframe.pack(side='left')
+            ttk.Label(maxframe,text='Max',padding=(6,0)).pack(side='left')
+            mvar=tk.DoubleVar()
+            sp=ttk.Spinbox(maxframe,textvariable=mvar,from_=0,to=30,increment=.05,width=6)
+            sp.pack(side='left')
+            ivar=tk.BooleanVar();icb=ttk.Checkbutton(maxframe,text='Inv',variable=ivar,width=5)
+            icb.pack(side='left')
+            avar.trace_add('write',lambda *a,b=b:self._pad_btn_target_changed(b))
+            mvar.trace_add('write',lambda *a:self._pad_map_edited())
+            ivar.trace_add('write',lambda *a:self._pad_map_edited())
+            live=tk.StringVar(value='○')
+            ttk.Label(row,textvariable=live,width=7).pack(side='right')
+            self.pad_vars['btn_'+b]={'target':avar,'max':mvar,'invert':ivar,
+                                     'maxframe':maxframe,'spin':sp,'invbtn':icb}
+            self.pad_btn_test_vars[b]=live
+        ttk.Button(g,text='Reset to defaults',command=lambda:self.guard(self._reset_pad_map)).pack(anchor='w',pady=8)
+        self._pad_loading=False
+        self._sync_pad_ui()
+    def _pad_btn_target_changed(self,b):
+        # Max/Invert only apply when a button drives an axis; grey them otherwise.
+        is_axis=self.pad_vars['btn_'+b]['target'].get() in LABELS
+        st='!disabled' if is_axis else 'disabled'
+        self.pad_vars['btn_'+b]['spin'].state([st] if is_axis else ['disabled'])
+        self.pad_vars['btn_'+b]['invbtn'].state([st] if is_axis else ['disabled'])
+        self._pad_map_edited()
+    def _sync_pad_ui(self):
+        self._pad_loading=True
+        try:
+            for inp,_ in STICK_INPUTS:
+                cfg=self.pad_map.get(inp,{})
+                tgt=cfg.get('target','') if isinstance(cfg,dict) else ''
+                name=LABELS[int(tgt[5:])] if tgt.startswith('axis:') and tgt[5:].isdigit() else 'Unassigned'
+                self.pad_vars[inp]['target'].set(name)
+                self.pad_vars[inp]['max'].set(float(cfg.get('max',0)) if isinstance(cfg,dict) else 0.0)
+                self.pad_vars[inp]['invert'].set(bool(cfg.get('invert')) if isinstance(cfg,dict) else False)
+            acts={f'action:{a}':lbl for a,lbl in ACTIONS}
+            axes={f'axis:{i}':lbl for i,lbl in enumerate(LABELS)}
+            for b,_ in BUTTON_INPUTS:
+                cfg=self.pad_map.get('btn_'+b,{})
+                tgt=cfg.get('target','') if isinstance(cfg,dict) else ''
+                v=self.pad_vars['btn_'+b]
+                v['target'].set(acts.get(tgt,axes.get(tgt,'Unassigned')))
+                v['max'].set(float(cfg.get('max',0)) if isinstance(cfg,dict) else 0.0)
+                v['invert'].set(bool(cfg.get('invert')) if isinstance(cfg,dict) else False)
+                is_axis=v['target'].get() in LABELS
+                v['spin'].state(['!disabled'] if is_axis else ['disabled'])
+                v['invbtn'].state(['!disabled'] if is_axis else ['disabled'])
+        finally:self._pad_loading=False
+    def _pad_map_edited(self):
+        if getattr(self,'_pad_loading',False):return
+        new={}
+        for inp,_ in STICK_INPUTS:
+            v=self.pad_vars[inp];t=v['target'].get()
+            try:maxv=max(0.0,min(30.0,float(v['max'].get())))
+            except (tk.TclError,TypeError,ValueError):return
+            new[inp]={'target':f'axis:{LABELS.index(t)}' if t in LABELS else '',
+                      'max':maxv,'invert':bool(v['invert'].get())}
+        acts={lbl:f'action:{a}' for a,lbl in ACTIONS}
+        axes={lbl:f'axis:{i}' for i,lbl in enumerate(LABELS)}
+        for b,_ in BUTTON_INPUTS:
+            v=self.pad_vars['btn_'+b];t=v['target'].get()
+            try:maxv=max(0.0,min(30.0,float(v['max'].get())))
+            except (tk.TclError,TypeError,ValueError):return
+            new['btn_'+b]={'target':acts.get(t,axes.get(t,'')),
+                           'max':maxv,'invert':bool(v['invert'].get())}
+        self.pad_map=validate_pad_map(new,LIMITS)
+        self._save_settings({'pad_map':self.pad_map})
+    def _reset_pad_map(self):
+        self.pad_map=default_pad_map(LIMITS)
+        self._save_settings({'pad_map':self.pad_map})
+        self._sync_pad_ui()
+        self.status.set('Gamepad mapping reset to defaults.')
     def _ch_var(self,key,default):
         if isinstance(default,bool):var=tk.BooleanVar(value=default)
         elif isinstance(default,(int,float)):var=tk.DoubleVar(value=default)
@@ -260,9 +372,9 @@ class App:
         left=ttk.Frame(main,width=410);right=ttk.Frame(main);main.add(left,weight=0);main.add(right,weight=1)
         tabs=ttk.Notebook(left);tabs.pack(fill='both',expand=True)
         pages=[]
-        for title in ('Presets','Sound channels','Controller','Schedules'):
+        for title in ('Presets','Sound channels','Controller','Gamepad','Schedules'):
             page=ttk.Frame(tabs,padding=12);tabs.add(page,text=title);pages.append(page)
-        p,a,c,s=pages
+        p,a,c,g,s=pages
         ttk.Label(p,text='Choose a starting movement',font=('Segoe UI',12,'bold')).pack(anchor='w',pady=5)
         self.variable('preset','Wave');ttk.Combobox(p,textvariable=self.vars['preset'],values=PRESETS,state='readonly').pack(fill='x')
         self.number(p,'Strength (0–1)','strength',.5,0,1,.05)
@@ -289,10 +401,11 @@ class App:
 
         ttk.Label(c,text='Xbox / mouse recording',font=('Segoe UI',12,'bold')).pack(anchor='w')
         self.pad_label=tk.StringVar();ttk.Label(c,textvariable=self.pad_label,wraplength=370).pack(anchor='w',pady=7)
-        self.number(c,'Controller sensitivity','sensitivity',.5,.01,1,.05)
+        self.number(c,'Mouse sensitivity','sensitivity',.5,.01,1,.05)
         self.number(c,'Stick dead zone','deadzone',.15,.05,.5,.01)
+        self.number(c,'Stick response (1=linear)','expo',1.,1.,2.5,.1)
         self.number(c,'Smoothing (seconds)','smooth',.18,.01,1,.01)
-        ttk.Label(c,text='Left stick: move | Right stick: turn/tilt\nTriggers: travel | Bumpers: roll\nA: record | B: stop | X: undo (when stopped)',wraplength=370).pack(anchor='w',pady=6)
+        ttk.Label(c,text='Assign sticks, triggers and buttons on the Gamepad tab.\nEach control has its own max; mouse sliders use the sensitivity above.',wraplength=370).pack(anchor='w',pady=6)
         ttk.Label(c,text='Mouse sliders also record. Center = stopped.\nChecked axes replace the previous take in the recorded range.',wraplength=370).pack(anchor='w',pady=5)
         for i,label in enumerate(LABELS):
             row=ttk.Frame(c);row.pack(fill='x',pady=1)
@@ -308,6 +421,8 @@ class App:
             ttk.Spinbox(row,textvariable=v,from_=.01,to=30,increment=.05,width=9,command=self.request_rebuild).pack(side='right')
         row=ttk.Frame(c);row.pack(fill='x');self.button(row,'Apply limits',self.rebuild)
 
+        self.build_gamepad_tab(g)
+
         ttk.Label(s,text='Native Deforum schedules (advanced)',font=('Segoe UI',11,'bold')).pack(anchor='w')
         ttk.Label(s,text='Edit keyframes or sin/cos expressions.\nThese values are movement per frame, not positions.',wraplength=370).pack(anchor='w',pady=6)
         for label in LABELS:
@@ -322,13 +437,22 @@ class App:
         row=ttk.Frame(rmain);row.pack(fill='x')
         ttk.Label(row,text='Deforum flat-depth geometry',font=('Segoe UI',12,'bold')).pack(side='left')
         self.button(row,'Load preview image',self.load_image)
+        self.button(row,'Load rendered video',self.load_video)
+        for text,val in (('Wireframe','wireframe'),('Video','video'),('Split','split')):
+            ttk.Radiobutton(row,text=text,variable=self.preview_mode,value=val,command=self.on_preview_mode).pack(side='left')
+        self.button(row,'Clear video',self.clear_video)
         ttk.Label(row,text='  Exaggerate preview: ').pack(side='left')
         self.variable('exaggerate', 1.0)
         ttk.Spinbox(row,textvariable=self.vars['exaggerate'],from_=1,to=20,increment=1,width=4,command=self.request_rebuild).pack(side='left')
-        self.preview=tk.Canvas(rmain,bg='#101923',height=330,highlightthickness=0);self.preview.pack(fill='both',expand=True,pady=5)
+        self.preview_frame=ttk.Frame(rmain);self.preview_frame.pack(fill='both',expand=True,pady=5)
+        self.preview=tk.Canvas(self.preview_frame,bg='#101923',highlightthickness=0)
+        self.preview_video=tk.Canvas(self.preview_frame,bg='#101923',highlightthickness=0)
+        self.preview.pack(side='left',fill='both',expand=True)
         ttk.Label(rmain,text='Camera warp matched to your animation.py. AI regeneration and cadence blending are not simulated.').pack(anchor='w')
         row=ttk.Frame(rmain);row.pack(fill='x',pady=5)
         self.button(row,' ⏮',self.rewind);self.button(row,' Play',self.play);self.button(row,' Pause / Stop',self.stop);self.button(row,' Record',self.record);self.button(row,'Undo',self.undo)
+        self.button(row,'Set A',self.set_loop_a);self.button(row,'Set B',self.set_loop_b)
+        ttk.Checkbutton(row,text='Loop A-B',variable=self.loop_on).pack(side='left')
         self.position_label=tk.StringVar();ttk.Label(row,textvariable=self.position_label).pack(side='right')
         self.timeline=tk.DoubleVar(value=0)
         self.seek=ttk.Scale(rmain,from_=0,to=799,variable=self.timeline,command=self.scrub);self.seek.pack(fill='x')
@@ -345,10 +469,16 @@ class App:
         ttk.Label(rspec,textvariable=self.spec_readout,wraplength=220,font=('Segoe UI',8)).pack(anchor='w')
         ttk.Button(rspec,text='New channel at cursor',command=lambda:self.guard(self._spec_new_channel)).pack(fill='x',pady=6)
 
+    def _load_settings(self):
+        try:return json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
+        except Exception:return {}
+    def _save_settings(self,patch):
+        d=self._load_settings();d.update(patch)
+        try:SETTINGS_FILE.write_text(json.dumps(d),encoding='utf-8')
+        except Exception:pass
     def apply_theme(self):
         dark=self.dark.get()
-        try:SETTINGS_FILE.write_text(json.dumps({'dark_mode':bool(dark)}),encoding='utf-8')
-        except Exception:pass
+        self._save_settings({'dark_mode':bool(dark)})
         style=ttk.Style();style.theme_use('clam')
         if dark:
             bg='#2b2b2b';fg='#e8e8e8';field='#1e1e1e';btn='#3d3d3d';sel='#3a6ea5'
@@ -359,6 +489,8 @@ class App:
             style.map('TButton',background=[('active','#4d4d4d'),('disabled',bg)],foreground=[('disabled','#7a7a7a')])
             style.configure('TCheckbutton',background=bg,foreground=fg)
             style.map('TCheckbutton',background=[('active',bg)])
+            style.configure('TRadiobutton',background=bg,foreground=fg)
+            style.map('TRadiobutton',background=[('active',bg)])
             style.configure('TCombobox',fieldbackground=field,background=btn,foreground=fg,arrowcolor=fg)
             style.map('TCombobox',fieldbackground=[('readonly',field)],foreground=[('readonly',fg)])
             style.configure('TSpinbox',fieldbackground=field,background=btn,foreground=fg,arrowcolor=fg)
@@ -535,8 +667,10 @@ class App:
         active=[(i,ch) for i,ch in enumerate(self.channels) if ch.get('enabled')]
         if not active:raise ValueError('Enable at least one channel first')
         for _,ch in active:
-            if not 10<=ch['low']<ch['high']<CHANNEL_SR/2:
-                raise ValueError(f"Channel '{ch['name']}': low cutoff must be below high cutoff (under {CHANNEL_SR//2} Hz)")
+            if not ch['low']<ch['high']:
+                raise ValueError(f"Channel '{ch['name']}': low cutoff must be below high cutoff")
+            if not ch['high']<CHANNEL_SR/2:
+                raise ValueError(f"Channel '{ch['name']}': high cutoff must be below {CHANNEL_SR//2} Hz (soundtrack is analyzed at {CHANNEL_SR} Hz)")
         self.snapshot()
         self.audio_busy=True;self.audio_label.set('Analyzing soundtrack...')
         def worker():
@@ -558,6 +692,63 @@ class App:
         if path:
             with Image.open(path) as im:self.preview_image=im.convert('RGB')
             self.geometry=None;self.rebuild()
+    def load_video(self):
+        path=filedialog.askopenfilename(filetypes=[('Video','*.mp4 *.mov *.avi *.mkv *.webm'),('All files','*')])
+        if path:self.set_video(path)
+    def set_video(self,path,quiet=False):
+        """Load a rendered video for frame-synced review. Returns True on success."""
+        try:v=VideoReview(path)
+        except Exception as e:
+            if not quiet:messagebox.showerror('Review video',str(e))
+            return False
+        if self.video:
+            try:self.video.close()
+            except Exception:pass
+        self.video=v;self.video_path=str(path)
+        notes=[]
+        if v.fps and abs(v.fps-self.fps)>0.5:
+            notes.append(f'Video is {v.fps:.2f} fps but the project is {self.fps:g} fps — frames map 1:1 by index, so picture may drift from the motion.')
+        if v.n!=len(self.base):
+            notes.append(f'Video has {v.n} frames, project has {len(self.base)} — past the shorter end the last available frame holds.')
+        if notes and not quiet:messagebox.showwarning('Review video','\n\n'.join(notes))
+        self.preview_mode.set('video');self._video_key=None;self._video_ok=False;self.draw_preview()
+        self.status.set(f'Review video: {Path(path).name} ({v.n} frames @ {v.fps:.2f} fps)')
+        return True
+    def on_preview_mode(self):
+        if self.preview_mode.get() in ('video','split') and self.video is None:
+            self.load_video()
+            if self.video is None:self.preview_mode.set('wireframe')
+        self.draw_preview()
+    def _preview_layout(self):
+        # Re-pack only on mode change: re-packing fires <Configure>, which
+        # calls draw_preview again — without this guard that recurses.
+        mode=self.preview_mode.get()
+        if mode==self._preview_mode_shown:return
+        self._preview_mode_shown=mode
+        self.preview.pack_forget();self.preview_video.pack_forget()
+        if mode=='video':
+            self.preview_video.pack(side='left',fill='both',expand=True)
+        elif mode=='split':
+            self.preview.pack(side='left',fill='both',expand=True)
+            self.preview_video.pack(side='left',fill='both',expand=True)
+        else:
+            self.preview.pack(side='left',fill='both',expand=True)
+    def clear_video(self):
+        if self.video:
+            try:self.video.close()
+            except Exception:pass
+        self.video=None;self.video_path='';self.preview_mode.set('wireframe')
+        self._video_key=None;self._video_ok=False;self.draw_preview()
+        self.status.set('Review video cleared')
+    def set_loop_a(self):
+        self.loop_a=self.frame
+        if self.loop_b is not None and self.loop_b<=self.loop_a:self.loop_b=None
+        self.status.set(f'Loop start: frame {self.loop_a}');self.draw_preview()
+    def set_loop_b(self):
+        if self.loop_a is None or self.frame<=self.loop_a:
+            self.status.set('Set loop start (A) first, then move past it and set B');return
+        self.loop_b=self.frame
+        self.status.set(f'Loop: frames {self.loop_a}-{self.loop_b} — enable "Loop A-B" to repeat');self.draw_preview()
     def start_audio(self):
         if not self.audio_path or not Path(self.audio_path).exists():return
         try:
@@ -636,16 +827,37 @@ class App:
         if self._rebuild_pending:
             self._rebuild_pending=False;self.rebuild()
         try:
-            pad,buttons,label=self.controller.read(float(self.vars['deadzone'].get()));self.pad_label.set(label)
+            raw=self.controller.read_raw();self.pad_label.set(raw['label'])
+            buttons=raw['buttons']
             pressed=buttons&~self.last_buttons;self.last_buttons=buttons
-            if pressed&0x1000:self.guard(self.record)
-            if pressed&0x2000:self.stop()
-            if pressed&0x4000 and not self.running:self.undo()
-            target=np.clip(pad+np.array([v.get() for v in self.manual]),-1,1)*float(self.vars['sensitivity'].get())*np.array([v.get() for v in self.limits])
+            if pressed:
+                for b,bit in BUTTON_BITS.items():
+                    if pressed&bit:
+                        act=button_action(self.pad_map,b)
+                        if act=='record':self.guard(self.record)
+                        elif act=='stop':self.stop()
+                        elif act=='undo':
+                            if not self.running:self.undo()
+                        elif act=='play':
+                            if not self.running:self.guard(self.play)
+            padv=pad_axis_target(raw,self.pad_map,float(self.vars['deadzone'].get()),
+                                 float(self.vars['expo'].get()))
+            manual=np.clip(np.array([v.get() for v in self.manual]),-1,1)
+            lim=np.array([v.get() for v in self.limits])
+            target=np.clip(padv+manual*float(self.vars['sensitivity'].get())*lim,-lim,lim)
+            if hasattr(self,'pad_test_vars'):
+                for inp,var in self.pad_test_vars.items():
+                    if inp in raw:var.set(f'{raw[inp]:+.2f}')
+                for b,var in self.pad_btn_test_vars.items():
+                    var.set('●' if buttons&BUTTON_BITS[b] else '○')
             alpha=1-math.exp(-dt/max(.01,float(self.vars['smooth'].get())))
             self.pad_smooth+=(target-self.pad_smooth)*alpha
             if self.running:
                 next_frame=min(len(self.base)-1,int((now-self.clock)*self.fps))
+                if (self.loop_on.get() and not self.recording and self.loop_a is not None
+                        and self.loop_b is not None and self.loop_a<self.loop_b
+                        and next_frame>self.loop_b):
+                    next_frame=self.loop_a;self.clock=now-self.loop_a/self.fps
                 if self.recording:
                     enabled=np.array([v.get() for v in self.enabled_axes])
                     for f in range(self.last_record+1,next_frame+1):
@@ -663,8 +875,16 @@ class App:
         self.frame=0;self.timeline.set(0);self.draw_preview()
 
     def draw_preview(self):
-        c=self.preview;c.delete('all');w=max(100,c.winfo_width());h=max(100,c.winfo_height())
+        self._preview_layout()
+        mode=self.preview_mode.get()
         f=min(self.frame,len(self.output)-1)
+        if mode in ('wireframe','split'):self._draw_wireframe(f)
+        if mode in ('video','split'):self._draw_video_panel(f)
+        loop=f'   |   Loop {self.loop_a}-{self.loop_b}' if self.loop_a is not None and self.loop_b is not None else ''
+        self.position_label.set(f'Frame {f} / {len(self.output)-1}   |   {f/self.fps:.2f}s'+('   RECORDING' if self.recording else '')+loop)
+        self.draw_graph(cursor_only=True)
+    def _draw_wireframe(self,f):
+        c=self.preview;c.delete('all');w=max(100,c.winfo_width());h=max(100,c.winfo_height())
         if self.geometry is not None:
             try:
                 im, done = self.geometry.seek(f, max_steps=4 if not self.running else 1)
@@ -683,8 +903,26 @@ class App:
             except ValueError as e:title=str(e)
         else:title=getattr(self,'geometry_error','Loading geometry...')
         c.create_text(12,12,anchor='nw',fill='white',width=max(80,w-24),text=title)
-        self.position_label.set(f'Frame {f} / {len(self.output)-1}   |   {f/self.fps:.2f}s'+('   RECORDING' if self.recording else ''))
-        self.draw_graph(cursor_only=True)
+    def _draw_video_panel(self,f):
+        c=self.preview_video;c.delete('all');w=max(100,c.winfo_width());h=max(100,c.winfo_height())
+        if self.video is None:
+            c.create_text(12,12,anchor='nw',fill='white',text='Load a rendered video to review it here');return
+        key=(f,w,h)
+        if key!=self._video_key:
+            # Re-decode only when the frame or panel size changed; repeated
+            # draw_preview calls (tweaks while paused) reuse the image.
+            self._video_key=key;self._video_ok=False
+            rgb=self.video.frame(f)
+            if rgb is not None:
+                im=Image.fromarray(rgb)
+                im.thumbnail((max(16,w-30),max(16,h-50)),Image.Resampling.LANCZOS)
+                self.tk_video=ImageTk.PhotoImage(im);self._video_ok=True
+            else:self._video_key=None
+        if self._video_ok:
+            c.create_image(w/2,h/2+10,image=self.tk_video)
+            title=f'Rendered video: {Path(self.video_path).name} | frame {f}'
+        else:title='Review video: frame unavailable'
+        c.create_text(12,12,anchor='nw',fill='white',width=max(80,w-24),text=title)
     def _draw_preview_soon(self):
         self._preview_queued=False
         if not self.running:self.draw_preview()
@@ -777,7 +1015,7 @@ class App:
             d['env']=None if ch['env'] is None else np.asarray(ch['env'],float).tolist()
             d['times']=None if ch['times'] is None else np.asarray(ch['times'],float).tolist()
             channels.append(d)
-        data={'format':'deforum-motion-studio','version':2,'config':self.config,'base':self.base.tolist(),'recorded':self.recorded.tolist(),'fps':self.fps,'controls':self.values(),'limits':[v.get() for v in self.limits],'audio_path':self.audio_path,'channels':channels,
+        data={'format':'deforum-motion-studio','version':2,'config':self.config,'base':self.base.tolist(),'recorded':self.recorded.tolist(),'fps':self.fps,'controls':self.values(),'limits':[v.get() for v in self.limits],'audio_path':self.audio_path,'video_path':self.video_path,'channels':channels,
               'spectrum':None if self.spectrum is None else {'f':np.asarray(self.spectrum[0],float).tolist(),'db':np.asarray(self.spectrum[1],float).tolist()}}
         Path(path).write_text(json.dumps(data,indent=2),encoding='utf-8');self.status.set('Project saved, including channel analysis. Back up the soundtrack separately.')
     def _migrate_v1_channels(self,d):
@@ -839,7 +1077,15 @@ class App:
         self.audio_path=d.get('audio_path','')
         self._cancel_pending_reanalyze()
         if self._audio_cache and self._audio_cache[0]!=self.audio_path:self._audio_cache=None
-        self.audio_label.set(Path(self.audio_path).name or 'No soundtrack');self.refresh_schedules();self.rebuild();self.info.set('Project: '+Path(path).name)
+        self.audio_label.set(Path(self.audio_path).name or 'No soundtrack')
+        vp=d.get('video_path','') or ''
+        if vp and Path(vp).is_file():self.set_video(vp,quiet=True)
+        else:
+            if self.video:
+                try:self.video.close()
+                except Exception:pass
+            self.video=None;self.video_path='';self.preview_mode.set('wireframe')
+        self.refresh_schedules();self.rebuild();self.info.set('Project: '+Path(path).name)
     def save_preset(self):
         path=filedialog.asksaveasfilename(defaultextension='.preset.json')
         if path:Path(path).write_text(json.dumps({'format':'dms-preset','fps':self.fps,'tracks':(self.base+self.recorded).tolist()},indent=2),encoding='utf-8')
@@ -869,7 +1115,11 @@ class App:
         export_config(config,self.output,self.fps,path)
         self.status.set('Exported. In Forge: Deforum -> Load All Settings -> select this file. Test a short render before a full video.')
     def close(self):
-        self._cancel_pending_reanalyze();self.stop();self.root.destroy()
+        self._cancel_pending_reanalyze();self.stop()
+        if self.video:
+            try:self.video.close()
+            except Exception:pass
+        self.root.destroy()
 
 if __name__=='__main__':
     root=tk.Tk();app=App(root);root.mainloop()
